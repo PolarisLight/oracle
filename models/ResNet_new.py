@@ -61,6 +61,10 @@ class ResNet_AmbiProto(nn.Module):
         self.tol_m = getattr(args.model, "tol_M", 5)
         self.conf_ema = getattr(args.model, "conf_ema", 0.95)
         self.proto_margin = getattr(args.model, "proto_margin", 0.20)
+        self.aa_warmup = getattr(args.model, "aa_warmup", 20)
+        self.aa_ramp = max(1, getattr(args.model, "aa_ramp", 40))
+        self.tol_warmup = getattr(args.model, "tol_warmup", 30)
+        self.conf_warmup = getattr(args.model, "conf_warmup", 20)
 
         self.prototypes = nn.Parameter(
             torch.randn(self.num_classes, self.proto_k, self.feature_dim) * 0.02
@@ -166,6 +170,11 @@ class ResNet_AmbiProto(nn.Module):
         }
         return logits, aux
 
+    def curriculum_scale(self, epoch: int) -> float:
+        if epoch < self.aa_warmup:
+            return 0.0
+        return min(1.0, float(epoch - self.aa_warmup + 1) / float(self.aa_ramp))
+
     def train_step(self, data, rt=None, epoch: int = 0):
         x = data["image"].to(self.device)
         y = _labels_to_index(data["label"].to(self.device))
@@ -173,19 +182,27 @@ class ResNet_AmbiProto(nn.Module):
         logits, aux = self(x)
         ambiguity = aux["ambiguity"]
         entropy = aux["entropy"]
+        schedule = self.curriculum_scale(epoch)
+        effective_ambiguity = ambiguity * schedule
 
         with torch.no_grad():
-            accept_set = self.get_accept_set(y)
+            if epoch >= self.conf_warmup:
+                accept_set = self.get_accept_set(y)
+            else:
+                accept_set = torch.empty(y.size(0), 0, device=y.device, dtype=torch.long)
 
         log_prob = F.log_softmax(logits, dim=1)
         hard_ce = -log_prob.gather(1, y.unsqueeze(1)).squeeze(1)
         guard = F.relu(self.kappa - entropy).pow(2)
-        loss_aa = ((1.0 - ambiguity) * hard_ce + ambiguity * self.lambda_g * guard).mean()
+        loss_aa = (
+            (1.0 - effective_ambiguity) * hard_ce
+            + effective_ambiguity * (self.lambda_g * schedule) * guard
+        ).mean()
 
-        if accept_set.numel() > 0:
+        if accept_set.numel() > 0 and epoch >= self.tol_warmup:
             tolerant_targets = self.build_tolerant_targets(y, accept_set)
             tolerant_ce = -(tolerant_targets * log_prob).sum(dim=1)
-            loss_t = (ambiguity * self.lambda_t * tolerant_ce).mean()
+            loss_t = (effective_ambiguity * self.lambda_t * tolerant_ce).mean()
         else:
             loss_t = logits.new_zeros(())
 
@@ -202,6 +219,7 @@ class ResNet_AmbiProto(nn.Module):
             "loss_tol": loss_t.detach(),
             "loss_proto": loss_proto.detach(),
             "ambiguity_mean": ambiguity.mean().detach(),
+            "schedule": torch.tensor(schedule, device=logits.device),
             "entropy_mean": entropy.mean().detach(),
         }
 

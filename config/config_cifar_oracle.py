@@ -104,6 +104,10 @@ def config(task:str, model:str, dataset:str, save_log:bool)->Arguments:
     args.model.tol_M = 5
     args.model.conf_ema = 0.95
     args.model.proto_margin = 0.20
+    args.model.aa_warmup = 20
+    args.model.aa_ramp = 40
+    args.model.tol_warmup = 30
+    args.model.conf_warmup = 20
 
     args.core_params = Arguments()
     args.core_params.mamba_alpha = 0.5  # SSM loss alpha parameter
