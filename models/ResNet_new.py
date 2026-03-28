@@ -68,6 +68,9 @@ class ResNet_AmbiProto(nn.Module):
         self.aa_ramp = max(1, getattr(args.model, "aa_ramp", 40))
         self.tol_warmup = getattr(args.model, "tol_warmup", 30)
         self.conf_warmup = getattr(args.model, "conf_warmup", 20)
+        self.late_soft_start = getattr(args.model, "late_soft_start", 150)
+        self.late_soft_end = max(self.late_soft_start + 1, getattr(args.model, "late_soft_end", 200))
+        self.late_soft_min = getattr(args.model, "late_soft_min", 0.25)
 
         self.prototypes = nn.Parameter(
             torch.randn(self.num_classes, self.proto_k, self.feature_dim) * 0.02
@@ -179,6 +182,12 @@ class ResNet_AmbiProto(nn.Module):
             return 0.0
         return min(1.0, float(epoch - self.aa_warmup + 1) / float(self.aa_ramp))
 
+    def late_soft_scale(self, epoch: int) -> float:
+        if epoch <= self.late_soft_start:
+            return 1.0
+        progress = min(1.0, float(epoch - self.late_soft_start) / float(self.late_soft_end - self.late_soft_start))
+        return 1.0 - progress * (1.0 - self.late_soft_min)
+
     def train_step(self, data, rt=None, epoch: int = 0):
         x = data["image"].to(self.device)
         y = _labels_to_index(data["label"].to(self.device))
@@ -188,6 +197,7 @@ class ResNet_AmbiProto(nn.Module):
         entropy = aux["entropy"]
         sim = aux["sim"]
         schedule = self.curriculum_scale(epoch)
+        soft_scale = self.late_soft_scale(epoch)
         effective_ambiguity = ambiguity * schedule
 
         with torch.no_grad():
@@ -210,7 +220,7 @@ class ResNet_AmbiProto(nn.Module):
         proto_commit = -(proto_assign * proto_assign.log()).sum(dim=1)
         loss_aa = (
             (1.0 - effective_ambiguity) * hard_ce
-            + effective_ambiguity * (self.lambda_g * schedule) * guard
+            + effective_ambiguity * (self.lambda_g * schedule * soft_scale) * guard
         ).mean()
         loss_clear = ((1.0 - effective_ambiguity) * self.lambda_c * clear_margin).mean()
         loss_commit = (
@@ -220,7 +230,7 @@ class ResNet_AmbiProto(nn.Module):
         if accept_set.numel() > 0 and epoch >= self.tol_warmup:
             tolerant_targets = self.build_tolerant_targets(y, accept_set)
             tolerant_ce = -(tolerant_targets * log_prob).sum(dim=1)
-            loss_t = (effective_ambiguity * self.lambda_t * tolerant_ce).mean()
+            loss_t = (effective_ambiguity * self.lambda_t * soft_scale * tolerant_ce).mean()
         else:
             loss_t = logits.new_zeros(())
 
@@ -240,6 +250,7 @@ class ResNet_AmbiProto(nn.Module):
             "loss_proto": loss_proto.detach(),
             "ambiguity_mean": ambiguity.mean().detach(),
             "schedule": torch.tensor(schedule, device=logits.device),
+            "soft_scale": torch.tensor(soft_scale, device=logits.device),
             "entropy_mean": entropy.mean().detach(),
         }
 

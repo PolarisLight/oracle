@@ -111,6 +111,9 @@ def config(task:str, model:str, dataset:str, save_log:bool)->Arguments:
     args.model.aa_ramp = 40
     args.model.tol_warmup = 30
     args.model.conf_warmup = 20
+    args.model.late_soft_start = 150
+    args.model.late_soft_end = 200
+    args.model.late_soft_min = 0.25
 
     args.core_params = Arguments()
     args.core_params.mamba_alpha = 0.5  # SSM loss alpha parameter
