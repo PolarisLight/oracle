@@ -92,8 +92,8 @@ def config(task:str, model:str, dataset:str, save_log:bool)->Arguments:
     args.model.num_experts = 3
     args.model.num_classes = 261 #1533
     args.model.dropout = 0.1
-    args.model.proto_k = 4
-    args.model.tau = 0.10
+    args.model.proto_k = 6
+    args.model.tau = 0.08
     args.model.ambi_beta = 5.0
     args.model.ambi_m0 = 0.0
     args.model.entropy_floor = 3.0
@@ -101,6 +101,7 @@ def config(task:str, model:str, dataset:str, save_log:bool)->Arguments:
     args.model.lambda_t = 0.3
     args.model.lambda_p = 0.05
     args.model.lambda_c = 0.20
+    args.model.lambda_commit = 0.04
     args.model.tol_eps = 0.08
     args.model.tol_M = 5
     args.model.conf_ema = 0.95

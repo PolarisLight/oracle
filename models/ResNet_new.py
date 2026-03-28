@@ -49,7 +49,7 @@ class ResNet_AmbiProto(nn.Module):
         self.layer3 = self._make_layer(block, 64, num_blocks[2], stride=2)
         self.feature_dim = 64
 
-        self.proto_k = getattr(args.model, "proto_k", 4)
+        self.proto_k = getattr(args.model, "proto_k", 6)
         self.tau = getattr(args.model, "tau", 0.10)
         self.beta = getattr(args.model, "ambi_beta", 5.0)
         self.m0 = getattr(args.model, "ambi_m0", 0.0)
@@ -58,6 +58,7 @@ class ResNet_AmbiProto(nn.Module):
         self.lambda_t = getattr(args.model, "lambda_t", 0.3)
         self.lambda_p = getattr(args.model, "lambda_p", 0.05)
         self.lambda_c = getattr(args.model, "lambda_c", 0.20)
+        self.lambda_commit = getattr(args.model, "lambda_commit", 0.04)
         self.tol_eps = getattr(args.model, "tol_eps", 0.08)
         self.tol_m = getattr(args.model, "tol_M", 5)
         self.conf_ema = getattr(args.model, "conf_ema", 0.95)
@@ -95,11 +96,11 @@ class ResNet_AmbiProto(nn.Module):
         feat = F.avg_pool2d(out, out.size(3)).view(out.size(0), -1)
         return feat
 
-    def forward_logits(self, feat: torch.Tensor) -> torch.Tensor:
+    def forward_logits(self, feat: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         feat_norm = F.normalize(feat, dim=1)
         proto_norm = F.normalize(self.prototypes, dim=2)
         sim = torch.einsum("bd,ckd->bck", feat_norm, proto_norm) / max(self.tau, 1e-6)
-        return torch.logsumexp(sim, dim=2)
+        return torch.logsumexp(sim, dim=2), sim
 
     def ambiguity_score(self, logits: torch.Tensor) -> torch.Tensor:
         top2 = torch.topk(logits, k=2, dim=1).values
@@ -159,13 +160,14 @@ class ResNet_AmbiProto(nn.Module):
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         feat = self.forward_features(x)
-        logits = self.forward_logits(feat)
+        logits, sim = self.forward_logits(feat)
         prob = F.softmax(logits, dim=1).clamp_min(1e-12)
         entropy = -(prob * prob.log()).sum(dim=1)
         ambiguity = self.ambiguity_score(logits)
         self.feature = feat
         aux = {
             "feat": feat,
+            "sim": sim,
             "prob": prob,
             "entropy": entropy,
             "ambiguity": ambiguity,
@@ -184,6 +186,7 @@ class ResNet_AmbiProto(nn.Module):
         logits, aux = self(x)
         ambiguity = aux["ambiguity"]
         entropy = aux["entropy"]
+        sim = aux["sim"]
         schedule = self.curriculum_scale(epoch)
         effective_ambiguity = ambiguity * schedule
 
@@ -202,11 +205,17 @@ class ResNet_AmbiProto(nn.Module):
             float("-inf"),
         ).max(dim=1).values
         clear_margin = F.relu(self.conf_margin - (target_logit - hardest_negative))
+        target_proto_sim = sim[torch.arange(y.size(0), device=y.device), y]
+        proto_assign = F.softmax(target_proto_sim, dim=1).clamp_min(1e-12)
+        proto_commit = -(proto_assign * proto_assign.log()).sum(dim=1)
         loss_aa = (
             (1.0 - effective_ambiguity) * hard_ce
             + effective_ambiguity * (self.lambda_g * schedule) * guard
         ).mean()
         loss_clear = ((1.0 - effective_ambiguity) * self.lambda_c * clear_margin).mean()
+        loss_commit = (
+            (1.0 - effective_ambiguity) * schedule * self.lambda_commit * proto_commit
+        ).mean()
 
         if accept_set.numel() > 0 and epoch >= self.tol_warmup:
             tolerant_targets = self.build_tolerant_targets(y, accept_set)
@@ -216,7 +225,7 @@ class ResNet_AmbiProto(nn.Module):
             loss_t = logits.new_zeros(())
 
         loss_proto = self.prototype_diversity_loss()
-        loss = loss_aa + loss_clear + loss_t + self.lambda_p * loss_proto
+        loss = loss_aa + loss_clear + loss_commit + loss_t + self.lambda_p * loss_proto
 
         with torch.no_grad():
             pred = logits.argmax(dim=1)
@@ -226,6 +235,7 @@ class ResNet_AmbiProto(nn.Module):
             "loss": loss,
             "loss_AA": loss_aa.detach(),
             "loss_clear": loss_clear.detach(),
+            "loss_commit": loss_commit.detach(),
             "loss_tol": loss_t.detach(),
             "loss_proto": loss_proto.detach(),
             "ambiguity_mean": ambiguity.mean().detach(),
