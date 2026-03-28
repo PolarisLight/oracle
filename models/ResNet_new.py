@@ -57,10 +57,12 @@ class ResNet_AmbiProto(nn.Module):
         self.lambda_g = getattr(args.model, "lambda_g", 0.5)
         self.lambda_t = getattr(args.model, "lambda_t", 0.3)
         self.lambda_p = getattr(args.model, "lambda_p", 0.05)
+        self.lambda_c = getattr(args.model, "lambda_c", 0.20)
         self.tol_eps = getattr(args.model, "tol_eps", 0.08)
         self.tol_m = getattr(args.model, "tol_M", 5)
         self.conf_ema = getattr(args.model, "conf_ema", 0.95)
         self.proto_margin = getattr(args.model, "proto_margin", 0.20)
+        self.conf_margin = getattr(args.model, "conf_margin", 1.0)
         self.aa_warmup = getattr(args.model, "aa_warmup", 20)
         self.aa_ramp = max(1, getattr(args.model, "aa_ramp", 40))
         self.tol_warmup = getattr(args.model, "tol_warmup", 30)
@@ -194,10 +196,17 @@ class ResNet_AmbiProto(nn.Module):
         log_prob = F.log_softmax(logits, dim=1)
         hard_ce = -log_prob.gather(1, y.unsqueeze(1)).squeeze(1)
         guard = F.relu(self.kappa - entropy).pow(2)
+        target_logit = logits.gather(1, y.unsqueeze(1)).squeeze(1)
+        hardest_negative = logits.masked_fill(
+            F.one_hot(y, num_classes=self.num_classes).bool(),
+            float("-inf"),
+        ).max(dim=1).values
+        clear_margin = F.relu(self.conf_margin - (target_logit - hardest_negative))
         loss_aa = (
             (1.0 - effective_ambiguity) * hard_ce
             + effective_ambiguity * (self.lambda_g * schedule) * guard
         ).mean()
+        loss_clear = ((1.0 - effective_ambiguity) * self.lambda_c * clear_margin).mean()
 
         if accept_set.numel() > 0 and epoch >= self.tol_warmup:
             tolerant_targets = self.build_tolerant_targets(y, accept_set)
@@ -207,7 +216,7 @@ class ResNet_AmbiProto(nn.Module):
             loss_t = logits.new_zeros(())
 
         loss_proto = self.prototype_diversity_loss()
-        loss = loss_aa + loss_t + self.lambda_p * loss_proto
+        loss = loss_aa + loss_clear + loss_t + self.lambda_p * loss_proto
 
         with torch.no_grad():
             pred = logits.argmax(dim=1)
@@ -216,6 +225,7 @@ class ResNet_AmbiProto(nn.Module):
         return {
             "loss": loss,
             "loss_AA": loss_aa.detach(),
+            "loss_clear": loss_clear.detach(),
             "loss_tol": loss_t.detach(),
             "loss_proto": loss_proto.detach(),
             "ambiguity_mean": ambiguity.mean().detach(),

@@ -100,10 +100,12 @@ def config(task:str, model:str, dataset:str, save_log:bool)->Arguments:
     args.model.lambda_g = 0.5
     args.model.lambda_t = 0.3
     args.model.lambda_p = 0.05
+    args.model.lambda_c = 0.20
     args.model.tol_eps = 0.08
     args.model.tol_M = 5
     args.model.conf_ema = 0.95
     args.model.proto_margin = 0.20
+    args.model.conf_margin = 1.0
     args.model.aa_warmup = 20
     args.model.aa_ramp = 40
     args.model.tol_warmup = 30
