@@ -12,6 +12,7 @@ autoresearch-lessons.md
 autoresearch-launch.json
 autoresearch-runtime.json
 autoresearch-runtime.log
+autoresearch-runtime*.log
 *.prev.tsv
 *.prev.json
 *.bak
